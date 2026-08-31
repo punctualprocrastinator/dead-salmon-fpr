@@ -1,0 +1,10 @@
+# Core test + synthetic self-tests (CPU, no downloads)
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+pytest>=8.0
+
+# For the real-model experiments (extract.py, data.py, run_breadth.py):
+# torch>=2.1
+# transformers>=5.0
+# datasets>=3.0
