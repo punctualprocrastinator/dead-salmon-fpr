@@ -9,8 +9,14 @@ naive test fires on models that have learned nothing ("dead salmons").
 The CALIBRATED test instead compares s against the distribution of the same
 statistic computed on K matched NULL models (untrained networks, shuffled
 labels, or random directions). A finding is significant iff it exceeds that
-empirical null distribution. This controls the false-positive rate to
-near-nominal while retaining power — provided K >= ~8-12 (K=1-2 is useless).
+null distribution. This controls the false-positive rate while retaining power.
+
+The plug-in Gaussian threshold (`calibrated_significant`) under-corrects on
+heavy-tailed pools, so its FPR only nears alpha by K ~ 8-12 (K=1-2 is useless).
+The portable recommendation is a distribution-free EMPIRICAL-QUANTILE test
+(`empirical_quantile_significant`) with K >= 20: its leave-one-out FPR is
+~1/(K+1) regardless of the pool shape, so it reaches the nominal rate for
+probes, concept-directions, and the extreme-value SAE statistic alike.
 
 This module is pure numpy/scipy and has no torch/transformers dependency, so the
 test is a drop-in for any pipeline that can produce a scalar statistic and a set
@@ -60,6 +66,24 @@ def calibrated_significant(
     return bool(z > z_crit)
 
 
+def empirical_quantile_significant(
+    statistic: float,
+    null_statistics: np.ndarray,
+    alpha: float = 0.05,
+) -> bool:
+    """Distribution-free null-model test (the paper's recommendation).
+
+    Flag `statistic` iff it exceeds the (1 - alpha) empirical quantile of the K
+    null statistics. Its leave-one-out false-positive rate is ~1/(K+1) whatever
+    the pool shape, so it reaches alpha at K >= 20 (1/21 = 0.048) and, unlike the
+    Gaussian plug-in, calibrates the heavy-tailed max-over-features (SAE)
+    statistic too.
+    """
+    null_statistics = np.asarray(null_statistics, dtype=float)
+    threshold = np.quantile(null_statistics, 1.0 - alpha, method="higher")
+    return bool(statistic > threshold)
+
+
 def z_score(statistic: float, null_statistics: np.ndarray) -> float:
     null_statistics = np.asarray(null_statistics, dtype=float)
     sd = null_statistics.std()
@@ -89,12 +113,16 @@ def false_positive_rate(
     K = len(null_statistics)
     if test == "naive":
         return float(np.mean([naive_significant(s, n_eval, alpha) for s in null_statistics]))
-    # calibrated, leave-one-out
+    # calibrated ("calibrated" = Gaussian z; "empirical" = distribution-free quantile),
+    # leave-one-out: hold each null out and test it against the distribution of the rest.
     hits = 0
     for i in range(K):
         held = null_statistics[i]
         rest = np.delete(null_statistics, i)
-        hits += calibrated_significant(held, rest, z_crit)
+        if test == "empirical":
+            hits += empirical_quantile_significant(held, rest, alpha)
+        else:
+            hits += calibrated_significant(held, rest, z_crit)
     return hits / K
 
 
@@ -109,6 +137,8 @@ def power(
     """Does the test flag a genuine trained-model finding?"""
     if test == "naive":
         return naive_significant(trained_statistic, n_eval, alpha)
+    if test == "empirical":
+        return empirical_quantile_significant(trained_statistic, null_statistics, alpha)
     return calibrated_significant(trained_statistic, null_statistics, z_crit)
 
 
@@ -118,14 +148,19 @@ def power(
 def k_seed_curve(
     null_pool: np.ndarray,
     k_values=(1, 2, 3, 5, 8, 12, 20, 32),
+    test: str = "calibrated",
     z_crit: float = Z_CRIT_ONE_SIDED_05,
+    alpha: float = 0.05,
     rng: np.random.Generator | None = None,
     n_repeats: int = 200,
 ) -> dict:
-    """Calibrated FPR as a function of K (number of null models used to build the
-    null distribution). Demonstrates that K=1-2 is useless and FPR converges to
-    alpha by K ~ 8-12. `null_pool` is a large pool of null-model statistics; for
-    each K we repeatedly split into K "calibration" nulls and test a held-out null.
+    """FPR as a function of K (number of null models used to build the null
+    distribution). Demonstrates that K=1-2 is useless. With `test="calibrated"`
+    (Gaussian) the FPR only nears alpha by K ~ 8-12; with `test="empirical"`
+    (distribution-free quantile, the recommendation) it tracks ~1/(K+1) and
+    reaches alpha at K >= 20. `null_pool` is a large pool of null-model
+    statistics; for each K we repeatedly split into K "calibration" nulls and
+    test a held-out null.
     """
     rng = np.random.default_rng() if rng is None else rng
     null_pool = np.asarray(null_pool, dtype=float)
@@ -138,6 +173,9 @@ def k_seed_curve(
             idx = rng.permutation(len(null_pool))
             cal = null_pool[idx[:K]]
             test_val = null_pool[idx[K]]
-            hits += calibrated_significant(test_val, cal, z_crit)
+            if test == "empirical":
+                hits += empirical_quantile_significant(test_val, cal, alpha)
+            else:
+                hits += calibrated_significant(test_val, cal, z_crit)
         out[K] = hits / n_repeats
     return out
