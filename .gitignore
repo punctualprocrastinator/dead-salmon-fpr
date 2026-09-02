@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# working draft of the paper (kept locally, not shared with reviewers)
+docs/paper.md
